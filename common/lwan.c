@@ -117,7 +117,7 @@ static const lwan_module_t *lwan_module_find(lwan_t *l, const char *name)
         }
 
         lwan_status_debug("Module \"%s\" registered", name);
-        hash_add(l->module_registry, module->name, module);
+        hash_add(l->module_registry, name, module);
     }
 
     return module;
@@ -131,7 +131,7 @@ static void destroy_urlmap(void *data)
         const lwan_module_t *module = url_map->module;
         if (module->shutdown)
             module->shutdown(url_map->data);
-    } else if (url_map->data) {
+    } else if (url_map->data && url_map->flags & HANDLER_DATA_IS_HASH_TABLE) {
         hash_free(url_map->data);
     }
 
@@ -271,7 +271,7 @@ add_map:
 
     if (handler) {
         url_map.handler = handler;
-        url_map.flags |= HANDLER_PARSE_MASK;
+        url_map.flags |= HANDLER_PARSE_MASK | HANDLER_DATA_IS_HASH_TABLE;
         url_map.data = hash;
         url_map.module = NULL;
 
@@ -354,23 +354,24 @@ static void parse_listener(config_t *c, config_line_t *l, lwan_t *lwan)
 
 const char *get_config_path(char *path_buf)
 {
+    char buffer[PATH_MAX];
     char *path = NULL;
     int ret;
 
 #if defined(__linux__)
     ssize_t path_len;
 
-    path_len = readlink("/proc/self/exe", path_buf, PATH_MAX);
-    if (path_len < 0) {
+    path_len = readlink("/proc/self/exe", buffer, PATH_MAX);
+    if (path_len < 0 || path_len >= PATH_MAX) {
         lwan_status_perror("readlink");
         goto out;
     }
-    path_buf[path_len] = '\0';
+    buffer[path_len] = '\0';
 #elif defined(__FreeBSD__)
     size_t path_len = PATH_MAX;
     int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
 
-    ret = sysctl(mib, N_ELEMENTS(mib), path_buf, &path_len, NULL, 0);
+    ret = sysctl(mib, N_ELEMENTS(mib), buffer, &path_len, NULL, 0);
     if (ret < 0) {
         lwan_status_perror("sysctl");
         goto out;
@@ -379,7 +380,7 @@ const char *get_config_path(char *path_buf)
     goto out;
 #endif
 
-    path = strrchr(path_buf, '/');
+    path = strrchr(buffer, '/');
     if (!path)
         goto out;
     ret = snprintf(path_buf, PATH_MAX, "%s.conf", path + 1);
@@ -670,8 +671,8 @@ lwan_main_loop(lwan_t *l)
             }
 
             lwan_status_perror("accept");
+        } else {
+            schedule_client(l, client_fd);
         }
-
-        schedule_client(l, client_fd);
     }
 }

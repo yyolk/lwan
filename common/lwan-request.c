@@ -305,11 +305,9 @@ decode_hex_digit(char ch)
 static ALWAYS_INLINE bool
 is_hex_digit(char ch)
 {
-    unsigned char c = (unsigned char)ch;
-
-    return ((c - '0') <= ('9' - '0'))
-        || ((c - 'a') <= ('f' - 'a'))
-        || ((c - 'A') <= ('F' - 'A'));
+    return (ch >= '0' && ch <= '9') ||
+        (ch >= 'a' && ch <= 'f') ||
+        (ch >= 'A' && ch <= 'F');
 }
 
 static size_t
@@ -386,7 +384,7 @@ parse_key_values(lwan_request_t *request,
         kvs[values].value = value;
 
         values++;
-    } while (ptr && values < n_elements);
+    } while (ptr && values < (n_elements - 1));
 
     kvs[values].key = kvs[values].value = NULL;
 
@@ -805,7 +803,8 @@ static lwan_read_finalizer_t read_request_finalizer(size_t total_read,
         return FINALIZER_DONE;
 
     if (get_http_method(helper->buffer->value) == REQUEST_METHOD_POST) {
-        char *post_data_separator = strrchr(helper->buffer->value, '\n');
+        char *post_data_separator = memrchr(helper->buffer->value, '\n',
+            helper->buffer->len);
         if (post_data_separator) {
             if (LIKELY(!memcmp(post_data_separator - 3, "\r\n\r", 3)))
                 return FINALIZER_DONE;
@@ -1060,10 +1059,15 @@ compare_key_value(const void *a, const void *b)
 static inline void *
 value_lookup(const void *base, size_t len, const char *key)
 {
-    lwan_key_value_t *entry, k = { .key = (char *)key };
+    if (LIKELY(base)) {
+        lwan_key_value_t k = { .key = (char *)key };
+        lwan_key_value_t *entry = bsearch(&k, base, len, sizeof(k), compare_key_value);
 
-    entry = bsearch(&k, base, len, sizeof(k), compare_key_value);
-    return LIKELY(entry) ? entry->value : NULL;
+        if (LIKELY(entry))
+            return entry->value;
+    }
+
+    return NULL;
 }
 
 const char *

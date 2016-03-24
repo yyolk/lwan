@@ -207,6 +207,7 @@ static int
 symtab_push(struct parser *parser, const lwan_var_descriptor_t *descriptor)
 {
     struct symtab *tab;
+    int r;
 
     if (!descriptor)
         return -ENODEV;
@@ -217,17 +218,28 @@ symtab_push(struct parser *parser, const lwan_var_descriptor_t *descriptor)
 
     tab->hash = hash_str_new(NULL, NULL);
     if (!tab->hash) {
-        free(tab);
-        return -ENOMEM;
+        r = -ENOMEM;
+        goto hash_new_err;
     }
 
     tab->next = parser->symtab;
     parser->symtab = tab;
 
-    for (; descriptor->name; descriptor++)
-        hash_add(parser->symtab->hash, descriptor->name, descriptor);
+    for (; descriptor->name; descriptor++) {
+        r = hash_add(parser->symtab->hash, descriptor->name, descriptor);
+
+        if (r < 0)
+            goto hash_add_err;
+    }
 
     return 0;
+
+hash_add_err:
+    hash_free(tab->hash);
+hash_new_err:
+    free(tab);
+
+    return r;
 }
 
 static void
@@ -244,6 +256,8 @@ symtab_pop(struct parser *parser)
 
 static void emit_lexeme(struct lexer *lexer, struct lexeme *lexeme)
 {
+    assert(lexer->ring_buffer.population < N_ELEMENTS(lexer->ring_buffer.lexemes));
+
     lexer->ring_buffer.lexemes[lexer->ring_buffer.last] = *lexeme;
     lexer->ring_buffer.last = (lexer->ring_buffer.last + 1) % N_ELEMENTS(lexer->ring_buffer.lexemes);
     lexer->ring_buffer.population++;
@@ -785,42 +799,43 @@ static void *parser_meta(struct parser *parser, struct lexeme *lexeme)
     return unexpected_lexeme(lexeme);
 }
 
+static strbuf_t *strbuf_from_lexeme(struct parser *parser, struct lexeme *lexeme)
+{
+    if (parser->template_flags & LWAN_TPL_FLAG_CONST_TEMPLATE)
+        return strbuf_new_static(lexeme->value.value, lexeme->value.len);
+
+    strbuf_t *buf = strbuf_new_with_size(lexeme->value.len);
+    if (buf)
+        strbuf_set(buf, lexeme->value.value, lexeme->value.len);
+
+    return buf;
+}
+
 static void *parser_text(struct parser *parser, struct lexeme *lexeme)
 {
     if (lexeme->type == LEXEME_LEFT_META)
         return parser_meta;
+
     if (lexeme->type == LEXEME_TEXT) {
         if (lexeme->value.len == 1) {
             emit_chunk(parser, ACTION_APPEND_CHAR, 0, (void *)(uintptr_t)*lexeme->value.value);
         } else {
-            strbuf_t *buf;
-
-            if (parser->template_flags & LWAN_TPL_FLAG_CONST_TEMPLATE) {
-                buf = strbuf_new_static(lexeme->value.value, lexeme->value.len);
-                if (!buf)
-                    goto no_buf;
-            } else {
-                buf = strbuf_new_with_size(lexeme->value.len);
-                if (!buf)
-                    goto no_buf;
-
-                strbuf_set(buf, lexeme->value.value, lexeme->value.len);
-            }
+            strbuf_t *buf = strbuf_from_lexeme(parser, lexeme);
+            if (!buf)
+                return error_lexeme(lexeme, "Out of memory");
 
             emit_chunk(parser, ACTION_APPEND, 0, buf);
         }
         parser->tpl->minimum_size += lexeme->value.len;
         return parser_text;
     }
+
     if (lexeme->type == LEXEME_EOF) {
         emit_chunk(parser, ACTION_LAST, 0, NULL);
         return NULL;
     }
 
     return unexpected_lexeme(lexeme);
-
-no_buf:
-    return error_lexeme(lexeme, "Out of memory");
 }
 
 void

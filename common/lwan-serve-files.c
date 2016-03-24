@@ -41,15 +41,9 @@ static const char *compression_none = NULL;
 static const char *compression_gzip = "gzip";
 static const char *compression_deflate = "deflate";
 
-typedef struct serve_files_priv_t_	serve_files_priv_t;
-typedef struct file_cache_entry_t_	file_cache_entry_t;
-typedef struct cache_funcs_t_		cache_funcs_t;
-typedef struct mmap_cache_data_t_	mmap_cache_data_t;
-typedef struct sendfile_cache_data_t_	sendfile_cache_data_t;
-typedef struct dir_list_cache_data_t_	dir_list_cache_data_t;
-typedef struct redir_cache_data_t_	redir_cache_data_t;
+struct file_cache_entry;
 
-struct serve_files_priv_t_ {
+struct serve_files_priv {
     struct cache_t *cache;
 
     struct {
@@ -64,20 +58,18 @@ struct serve_files_priv_t_ {
     lwan_tpl_t *directory_list_tpl;
 
     bool serve_precompressed_files;
+    bool auto_index;
 };
 
-struct cache_funcs_t_ {
-    lwan_http_status_t (*serve)(lwan_request_t *request,
-                                void *data);
-    bool (*init)(file_cache_entry_t *ce,
-                 serve_files_priv_t *priv,
-                 const char *full_path,
-                 struct stat *st);
+struct cache_funcs {
+    lwan_http_status_t (*serve)(lwan_request_t *request, void *data);
+    bool (*init)(struct file_cache_entry *ce, struct serve_files_priv *priv,
+        const char *full_path, struct stat *st);
     void (*free)(void *data);
     size_t struct_size;
 };
 
-struct mmap_cache_data_t_ {
+struct mmap_cache_data {
     struct {
         void *contents;
         /* zlib expects unsigned longs instead of size_t */
@@ -85,22 +77,22 @@ struct mmap_cache_data_t_ {
     } compressed, uncompressed;
 };
 
-struct sendfile_cache_data_t_ {
+struct sendfile_cache_data {
     struct {
-        char *filename;
+        int fd;
         size_t size;
     } compressed, uncompressed;
 };
 
-struct dir_list_cache_data_t_ {
+struct dir_list_cache_data {
     strbuf_t *rendered;
 };
 
-struct redir_cache_data_t_ {
+struct redir_cache_data {
     char *redir_to;
 };
 
-struct file_cache_entry_t_ {
+struct file_cache_entry {
     struct cache_entry_t base;
 
     struct {
@@ -109,10 +101,10 @@ struct file_cache_entry_t_ {
     } last_modified;
 
     const char *mime_type;
-    const cache_funcs_t *funcs;
+    const struct cache_funcs *funcs;
 };
 
-struct file_list_t {
+struct file_list {
     const char *full_path;
     const char *rel_path;
     struct {
@@ -130,63 +122,65 @@ struct file_list_t {
 
 static int directory_list_generator(coro_t *coro);
 
-static bool mmap_init(file_cache_entry_t *ce, serve_files_priv_t *priv,
-                       const char *full_path, struct stat *st);
+static bool mmap_init(struct file_cache_entry *ce,
+    struct serve_files_priv *priv, const char *full_path, struct stat *st);
 static void mmap_free(void *data);
 static lwan_http_status_t mmap_serve(lwan_request_t *request, void *data);
-static bool sendfile_init(file_cache_entry_t *ce, serve_files_priv_t *priv,
-                           const char *full_path, struct stat *st);
+
+static bool sendfile_init(struct file_cache_entry *ce,
+    struct serve_files_priv *priv, const char *full_path, struct stat *st);
 static void sendfile_free(void *data);
 static lwan_http_status_t sendfile_serve(lwan_request_t *request, void *data);
-static bool dirlist_init(file_cache_entry_t *ce, serve_files_priv_t *priv,
-                       const char *full_path, struct stat *st);
+
+static bool dirlist_init(struct file_cache_entry *ce,
+    struct serve_files_priv *priv, const char *full_path, struct stat *st);
 static void dirlist_free(void *data);
 static lwan_http_status_t dirlist_serve(lwan_request_t *request, void *data);
-static bool redir_init(file_cache_entry_t *ce, serve_files_priv_t *priv,
-                       const char *full_path, struct stat *st);
+
+static bool redir_init(struct file_cache_entry *ce,
+    struct serve_files_priv *priv, const char *full_path, struct stat *st);
 static void redir_free(void *data);
 static lwan_http_status_t redir_serve(lwan_request_t *request, void *data);
 
-
-static const cache_funcs_t mmap_funcs = {
+static const struct cache_funcs mmap_funcs = {
     .init = mmap_init,
     .free = mmap_free,
     .serve = mmap_serve,
-    .struct_size = sizeof(mmap_cache_data_t)
+    .struct_size = sizeof(struct mmap_cache_data)
 };
 
-static const cache_funcs_t sendfile_funcs = {
+static const struct cache_funcs sendfile_funcs = {
     .init = sendfile_init,
     .free = sendfile_free,
     .serve = sendfile_serve,
-    .struct_size = sizeof(sendfile_cache_data_t)
+    .struct_size = sizeof(struct sendfile_cache_data)
 };
 
-static const cache_funcs_t dirlist_funcs = {
+static const struct cache_funcs dirlist_funcs = {
     .init = dirlist_init,
     .free = dirlist_free,
     .serve = dirlist_serve,
-    .struct_size = sizeof(dir_list_cache_data_t)
+    .struct_size = sizeof(struct dir_list_cache_data)
 };
 
-static const cache_funcs_t redir_funcs = {
+static const struct cache_funcs redir_funcs = {
     .init = redir_init,
     .free = redir_free,
     .serve = redir_serve,
-    .struct_size = sizeof(redir_cache_data_t)
+    .struct_size = sizeof(struct redir_cache_data)
 };
 
 static const lwan_var_descriptor_t file_list_desc[] = {
-    TPL_VAR_STR_ESCAPE(struct file_list_t, full_path),
-    TPL_VAR_STR_ESCAPE(struct file_list_t, rel_path),
-    TPL_VAR_SEQUENCE(struct file_list_t, file_list, directory_list_generator, (
+    TPL_VAR_STR_ESCAPE(struct file_list, full_path),
+    TPL_VAR_STR_ESCAPE(struct file_list, rel_path),
+    TPL_VAR_SEQUENCE(struct file_list, file_list, directory_list_generator, (
         (const lwan_var_descriptor_t[]) {
-            TPL_VAR_STR(struct file_list_t, file_list.icon),
-            TPL_VAR_STR(struct file_list_t, file_list.icon_alt),
-            TPL_VAR_STR(struct file_list_t, file_list.name),
-            TPL_VAR_STR(struct file_list_t, file_list.type),
-            TPL_VAR_INT(struct file_list_t, file_list.size),
-            TPL_VAR_STR(struct file_list_t, file_list.unit),
+            TPL_VAR_STR(struct file_list, file_list.icon),
+            TPL_VAR_STR(struct file_list, file_list.icon_alt),
+            TPL_VAR_STR(struct file_list, file_list.name),
+            TPL_VAR_STR(struct file_list, file_list.type),
+            TPL_VAR_INT(struct file_list, file_list.size),
+            TPL_VAR_STR(struct file_list, file_list.unit),
             TPL_VAR_SENTINEL
         }
     )),
@@ -232,7 +226,7 @@ directory_list_generator(coro_t *coro)
 {
     DIR *dir;
     struct dirent entry, *buffer;
-    struct file_list_t *fl = coro_get_data(coro);
+    struct file_list *fl = coro_get_data(coro);
     int fd;
 
     dir = opendir(fl->full_path);
@@ -301,7 +295,7 @@ is_compression_worthy(const size_t compressed_sz, const size_t uncompressed_sz)
 }
 
 static void
-compress_cached_entry(mmap_cache_data_t *md)
+compress_cached_entry(struct mmap_cache_data *md)
 {
     md->compressed.size = compressBound(md->uncompressed.size);
 
@@ -323,12 +317,10 @@ error_zero_out:
 }
 
 static bool
-mmap_init(file_cache_entry_t *ce,
-           serve_files_priv_t *priv,
-           const char *full_path,
-           struct stat *st)
+mmap_init(struct file_cache_entry *ce, struct serve_files_priv *priv,
+    const char *full_path, struct stat *st)
 {
-    mmap_cache_data_t *md = (mmap_cache_data_t *)(ce + 1);
+    struct mmap_cache_data *md = (struct mmap_cache_data *)(ce + 1);
     int file_fd;
     bool success;
 
@@ -363,13 +355,13 @@ close_file:
 }
 
 static bool
-sendfile_init(file_cache_entry_t *ce,
-               serve_files_priv_t *priv,
-               const char *full_path,
-               struct stat *st)
+sendfile_init(struct file_cache_entry *ce, struct serve_files_priv *priv,
+    const char *full_path, struct stat *st)
 {
-    sendfile_cache_data_t *sd = (sendfile_cache_data_t *)(ce + 1);
+    char gzpath[PATH_MAX];
+    struct sendfile_cache_data *sd = (struct sendfile_cache_data *)(ce + 1);
     struct stat compressed_st;
+    int ret;
 
     ce->mime_type = lwan_determine_mime_type_for_file_name(
                 full_path + priv->root.path_len);
@@ -378,27 +370,46 @@ sendfile_init(file_cache_entry_t *ce,
         goto only_uncompressed;
 
     /* Try to serve a compressed file using sendfile() if $FILENAME.gz exists */
-    int len = asprintf(&sd->compressed.filename, "%s.gz", full_path + priv->root.path_len + 1);
-    if (UNLIKELY(len < 0 || len >= PATH_MAX))
+    ret = snprintf(gzpath, PATH_MAX, "%s.gz", full_path + priv->root.path_len + 1);
+    if (UNLIKELY(ret < 0 || ret >= PATH_MAX))
         goto only_uncompressed;
 
-    int ret = fstatat(priv->root.fd, sd->compressed.filename, &compressed_st, 0);
-    if (LIKELY(ret >= 0 && compressed_st.st_mtime >= st->st_mtime &&
+    sd->compressed.fd = openat(priv->root.fd, gzpath, priv->open_mode);
+    if (UNLIKELY(sd->compressed.fd < 0))
+        goto only_uncompressed;
+
+    ret = fstat(sd->compressed.fd, &compressed_st);
+    if (LIKELY(!ret && compressed_st.st_mtime >= st->st_mtime &&
             is_compression_worthy((size_t)compressed_st.st_size, (size_t)st->st_size))) {
         sd->compressed.size = (size_t)compressed_st.st_size;
     } else {
-        free(sd->compressed.filename);
+        close(sd->compressed.fd);
 
 only_uncompressed:
-        sd->compressed.filename = NULL;
+        sd->compressed.fd = -1;
         sd->compressed.size = 0;
     }
 
-    /* Regardless of the existence of $FILENAME.gz, store the full path */
+    /* Regardless of the existence of $FILENAME.gz, keep the uncompressed file open */
     sd->uncompressed.size = (size_t)st->st_size;
-    sd->uncompressed.filename = strdup(full_path + priv->root.path_len + 1);
-    if (UNLIKELY(!sd->uncompressed.filename)) {
-        free(sd->compressed.filename);
+    sd->uncompressed.fd = openat(priv->root.fd, full_path + priv->root.path_len + 1, priv->open_mode);
+    if (UNLIKELY(sd->uncompressed.fd < 0)) {
+        int openat_errno = errno;
+
+        close(sd->compressed.fd);
+
+        switch (openat_errno) {
+        case ENFILE:
+        case EMFILE:
+        case EACCES:
+            /* These errors should produce responses other than 404, so store errno as the
+             * file descriptor. */
+
+            sd->uncompressed.fd = sd->compressed.fd = -openat_errno;
+            sd->compressed.size = 0;
+            return true;
+        }
+
         return false;
     }
 
@@ -406,13 +417,11 @@ only_uncompressed:
 }
 
 static bool
-dirlist_init(file_cache_entry_t *ce,
-               serve_files_priv_t *priv,
-               const char *full_path,
-               struct stat *st __attribute__((unused)))
+dirlist_init(struct file_cache_entry *ce, struct serve_files_priv *priv,
+    const char *full_path, struct stat *st __attribute__((unused)))
 {
-    dir_list_cache_data_t *dd = (dir_list_cache_data_t *)(ce + 1);
-    struct file_list_t vars = {
+    struct dir_list_cache_data *dd = (struct dir_list_cache_data *)(ce + 1);
+    struct file_list vars = {
         .full_path = full_path,
         .rel_path = full_path + priv->root.path_len
     };
@@ -424,12 +433,10 @@ dirlist_init(file_cache_entry_t *ce,
 }
 
 static bool
-redir_init(file_cache_entry_t *ce,
-            serve_files_priv_t *priv,
-            const char *full_path,
-            struct stat *st __attribute__((unused)))
+redir_init(struct file_cache_entry *ce, struct serve_files_priv *priv,
+    const char *full_path, struct stat *st __attribute__((unused)))
 {
-    redir_cache_data_t *rd = (redir_cache_data_t *)(ce + 1);
+    struct redir_cache_data *rd = (struct redir_cache_data *)(ce + 1);
 
     if (asprintf(&rd->redir_to, "%s/", full_path + priv->root.path_len) < 0)
         return false;
@@ -438,8 +445,16 @@ redir_init(file_cache_entry_t *ce,
     return true;
 }
 
-static const cache_funcs_t *
-get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
+static bool
+is_world_readable(mode_t mode)
+{
+    const mode_t world_readable = S_IRUSR | S_IRGRP | S_IROTH;
+
+    return (mode & world_readable) == world_readable;
+}
+
+static const struct cache_funcs *
+get_funcs(struct serve_files_priv *priv, const char *key, char *full_path,
     struct stat *st)
 {
     char index_html_path_buf[PATH_MAX];
@@ -469,9 +484,18 @@ get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
             if (UNLIKELY(errno != ENOENT))
                 return NULL;
 
-            /* If it doesn't, we want to generate a directory list. */
-            return &dirlist_funcs;
+            if (LIKELY(priv->auto_index)) {
+                /* If it doesn't, we want to generate a directory list. */
+                return &dirlist_funcs;
+            }
+
+            /* Auto index is disabled. */
+            return NULL;
         }
+
+        /* Only serve world-readable indexes. */
+        if (UNLIKELY(!is_world_readable(st->st_mode)))
+            return NULL;
 
         /* If it does, we want its full path. */
 
@@ -485,6 +509,10 @@ get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
                     PATH_MAX - priv->root.path_len - 1);
     }
 
+    /* Only serve regular files. */
+    if (UNLIKELY(!S_ISREG(st->st_mode)))
+        return NULL;
+
     /* It's not a directory: choose the fastest way to serve the file
      * judging by its size. */
     if (st->st_size < 16384)
@@ -493,11 +521,11 @@ get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
     return &sendfile_funcs;
 }
 
-static file_cache_entry_t *
-create_cache_entry_from_funcs(serve_files_priv_t *priv, const char *full_path,
-    struct stat *st, const cache_funcs_t *funcs)
+static struct file_cache_entry *
+create_cache_entry_from_funcs(struct serve_files_priv *priv,
+    const char *full_path, struct stat *st, const struct cache_funcs *funcs)
 {
-    file_cache_entry_t *fce;
+    struct file_cache_entry *fce;
 
     fce = malloc(sizeof(*fce) + funcs->struct_size);
     if (UNLIKELY(!fce))
@@ -519,18 +547,17 @@ create_cache_entry_from_funcs(serve_files_priv_t *priv, const char *full_path,
 static struct cache_entry_t *
 create_cache_entry(const char *key, void *context)
 {
-    const mode_t world_readable = S_IRUSR | S_IRGRP | S_IROTH;
-    serve_files_priv_t *priv = context;
-    file_cache_entry_t *fce;
+    struct serve_files_priv *priv = context;
+    struct file_cache_entry *fce;
     struct stat st;
-    const cache_funcs_t *funcs;
+    const struct cache_funcs *funcs;
     char full_path[PATH_MAX];
 
     if (UNLIKELY(!realpathat2(priv->root.fd, priv->root.path,
                 key, full_path, &st)))
         return NULL;
 
-    if (UNLIKELY((st.st_mode & world_readable) != world_readable))
+    if (UNLIKELY(!is_world_readable(st.st_mode)))
         return NULL;
 
     if (UNLIKELY(strncmp(full_path, priv->root.path, priv->root.path_len)))
@@ -553,7 +580,7 @@ create_cache_entry(const char *key, void *context)
 static void
 mmap_free(void *data)
 {
-    mmap_cache_data_t *md = data;
+    struct mmap_cache_data *md = data;
 
     munmap(md->uncompressed.contents, md->uncompressed.size);
     free(md->compressed.contents);
@@ -562,16 +589,18 @@ mmap_free(void *data)
 static void
 sendfile_free(void *data)
 {
-    sendfile_cache_data_t *sd = data;
+    struct sendfile_cache_data *sd = data;
 
-    free(sd->compressed.filename);
-    free(sd->uncompressed.filename);
+    if (sd->compressed.fd >= 0)
+        close(sd->compressed.fd);
+    if (sd->uncompressed.fd >= 0)
+        close(sd->uncompressed.fd);
 }
 
 static void
 dirlist_free(void *data)
 {
-    dir_list_cache_data_t *dd = data;
+    struct dir_list_cache_data *dd = data;
 
     strbuf_free(dd->rendered);
 }
@@ -579,7 +608,7 @@ dirlist_free(void *data)
 static void
 redir_free(void *data)
 {
-    redir_cache_data_t *rd = data;
+    struct redir_cache_data *rd = data;
 
     free(rd->redir_to);
 }
@@ -587,7 +616,7 @@ redir_free(void *data)
 static void
 destroy_cache_entry(struct cache_entry_t *entry, void *context __attribute__((unused)))
 {
-    file_cache_entry_t *fce = (file_cache_entry_t *)entry;
+    struct file_cache_entry *fce = (struct file_cache_entry *)entry;
 
     fce->funcs->free(fce + 1);
     free(fce);
@@ -631,7 +660,7 @@ serve_files_init(void *args)
     struct lwan_serve_files_settings_t *settings = args;
     char *canonical_root;
     int root_fd;
-    serve_files_priv_t *priv;
+    struct serve_files_priv *priv;
     int open_mode;
 
     if (!settings->root_path) {
@@ -685,6 +714,7 @@ serve_files_init(void *args)
     priv->open_mode = open_mode;
     priv->index_html = settings->index_html ? settings->index_html : "index.html";
     priv->serve_precompressed_files = settings->serve_precompressed_files;
+    priv->auto_index = settings->auto_index;
 
     return priv;
 
@@ -708,6 +738,7 @@ serve_files_init_from_hash(const struct hash *hash)
         .index_html = hash_find(hash, "index_path"),
         .serve_precompressed_files =
             parse_bool(hash_find(hash, "serve_precompressed_files"), true),
+        .auto_index = parse_bool(hash_find(hash, "auto_index"), true),
         .directory_list_template = hash_find(hash, "directory_list_template")
     };
     return serve_files_init(&settings);
@@ -716,7 +747,7 @@ serve_files_init_from_hash(const struct hash *hash)
 static void
 serve_files_shutdown(void *data)
 {
-    serve_files_priv_t *priv = data;
+    struct serve_files_priv *priv = data;
 
     if (!priv) {
         lwan_status_warning("Nothing to shutdown");
@@ -737,13 +768,9 @@ client_has_fresh_content(lwan_request_t *request, time_t mtime)
 }
 
 static size_t
-prepare_headers(lwan_request_t *request,
-                 lwan_http_status_t return_status,
-                 file_cache_entry_t *fce,
-                 size_t size,
-                 const char *compression_type,
-                 char *header_buf,
-                 size_t header_buf_size)
+prepare_headers(lwan_request_t *request, lwan_http_status_t return_status,
+    struct file_cache_entry *fce, size_t size, const char *compression_type,
+    char *header_buf, size_t header_buf_size)
 {
     lwan_key_value_t headers[3] = {
         [0] = { .key = "Last-Modified", .value = fce->last_modified.string },
@@ -816,22 +843,22 @@ compute_range(lwan_request_t *request, off_t *from, off_t *to, off_t size)
 static lwan_http_status_t
 sendfile_serve(lwan_request_t *request, void *data)
 {
-    file_cache_entry_t *fce = data;
-    sendfile_cache_data_t *sd = (sendfile_cache_data_t *)(fce + 1);
+    struct file_cache_entry *fce = data;
+    struct sendfile_cache_data *sd = (struct sendfile_cache_data *)(fce + 1);
     char headers[DEFAULT_BUFFER_SIZE];
     size_t header_len;
     lwan_http_status_t return_status;
     off_t from, to;
     const char *compressed;
-    char *filename;
     size_t size;
+    int fd;
 
     if (sd->compressed.size && (request->flags & REQUEST_ACCEPT_GZIP)) {
         from = 0;
         to = (off_t)sd->compressed.size;
 
         compressed = compression_gzip;
-        filename = sd->compressed.filename;
+        fd = sd->compressed.fd;
         size = sd->compressed.size;
 
         return_status = HTTP_OK;
@@ -841,8 +868,19 @@ sendfile_serve(lwan_request_t *request, void *data)
             return HTTP_RANGE_UNSATISFIABLE;
 
         compressed = compression_none;
-        filename = sd->uncompressed.filename;
+        fd = sd->uncompressed.fd;
         size = sd->uncompressed.size;
+    }
+    if (UNLIKELY(fd < 0)) {
+        switch (-fd) {
+        case EACCES:
+            return HTTP_FORBIDDEN;
+        case EMFILE:
+        case ENFILE:
+            return HTTP_UNAVAILABLE;
+        default:
+            return HTTP_INTERNAL_ERROR;
+        }
     }
 
     if (client_has_fresh_content(request, fce->last_modified.integer))
@@ -856,36 +894,15 @@ sendfile_serve(lwan_request_t *request, void *data)
     if (request->flags & REQUEST_METHOD_HEAD || return_status == HTTP_NOT_MODIFIED) {
         lwan_write(request, headers, header_len);
     } else {
-        serve_files_priv_t *priv = request->response.stream.priv;
-        /*
-         * lwan_openat() will yield from the coroutine if openat()
-         * can't open the file due to not having free file descriptors
-         * around. This will happen just a handful of times.
-         * The file will be automatically closed whenever this
-         * coroutine is freed.
-         */
-        int file_fd = lwan_openat(request, priv->root.fd, filename, priv->open_mode);
-        if (UNLIKELY(file_fd < 0)) {
-            switch (file_fd) {
-            case -EACCES:
-                return HTTP_FORBIDDEN;
-            case -ENFILE:
-                return HTTP_UNAVAILABLE;
-            default:
-                return HTTP_NOT_FOUND;
-            }
-        }
-
-        lwan_sendfile(request, file_fd, from, (size_t)to,
-            headers, header_len);
+        lwan_sendfile(request, fd, from, (size_t)to, headers, header_len);
     }
 
     return return_status;
 }
 
 static lwan_http_status_t
-serve_contents_and_size(lwan_request_t *request, file_cache_entry_t *fce,
-            const char *compression_type, void *contents, size_t size)
+serve_contents_and_size(lwan_request_t *request, struct file_cache_entry *fce,
+    const char *compression_type, void *contents, size_t size)
 {
     char headers[DEFAULT_BUFFER_SIZE];
     size_t header_len;
@@ -917,8 +934,8 @@ serve_contents_and_size(lwan_request_t *request, file_cache_entry_t *fce,
 static lwan_http_status_t
 mmap_serve(lwan_request_t *request, void *data)
 {
-    file_cache_entry_t *fce = data;
-    mmap_cache_data_t *md = (mmap_cache_data_t *)(fce + 1);
+    struct file_cache_entry *fce = data;
+    struct mmap_cache_data *md = (struct mmap_cache_data *)(fce + 1);
     void *contents;
     size_t size;
     const char *compressed;
@@ -939,8 +956,8 @@ mmap_serve(lwan_request_t *request, void *data)
 static lwan_http_status_t
 dirlist_serve(lwan_request_t *request, void *data)
 {
-    file_cache_entry_t *fce = data;
-    dir_list_cache_data_t *dd = (dir_list_cache_data_t *)(fce + 1);
+    struct file_cache_entry *fce = data;
+    struct dir_list_cache_data *dd = (struct dir_list_cache_data *)(fce + 1);
 
     return serve_contents_and_size(request, fce, compression_none,
             strbuf_get_buffer(dd->rendered), strbuf_get_length(dd->rendered));
@@ -949,8 +966,8 @@ dirlist_serve(lwan_request_t *request, void *data)
 static lwan_http_status_t
 redir_serve(lwan_request_t *request, void *data)
 {
-    file_cache_entry_t *fce = data;
-    redir_cache_data_t *rd = (redir_cache_data_t *)(fce + 1);
+    struct file_cache_entry *fce = data;
+    struct redir_cache_data *rd = (struct redir_cache_data *)(fce + 1);
     char header_buf[DEFAULT_BUFFER_SIZE];
     size_t header_buf_size;
     lwan_key_value_t headers[2] = {
@@ -979,7 +996,7 @@ static lwan_http_status_t
 serve_files_handle_cb(lwan_request_t *request, lwan_response_t *response, void *data)
 {
     lwan_http_status_t return_status = HTTP_NOT_FOUND;
-    serve_files_priv_t *priv = data;
+    struct serve_files_priv *priv = data;
     struct cache_entry_t *ce;
 
     if (UNLIKELY(!priv)) {
@@ -990,7 +1007,7 @@ serve_files_handle_cb(lwan_request_t *request, lwan_response_t *response, void *
     ce = cache_coro_get_and_ref_entry(priv->cache, request->conn->coro,
                 request->url.value);
     if (LIKELY(ce)) {
-        file_cache_entry_t *fce = (file_cache_entry_t *)ce;
+        struct file_cache_entry *fce = (struct file_cache_entry *)ce;
         response->mime_type = fce->mime_type;
         response->stream.callback = fce->funcs->serve;
         response->stream.data = ce;
@@ -1007,7 +1024,6 @@ fail:
 const lwan_module_t *lwan_module_serve_files(void)
 {
     static const lwan_module_t serve_files = {
-        .name = "serve_files",
         .init = serve_files_init,
         .init_from_hash = serve_files_init_from_hash,
         .shutdown = serve_files_shutdown,
